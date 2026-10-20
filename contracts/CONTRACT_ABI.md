@@ -225,6 +225,21 @@ fn update_metadata(env: Env, campaign_id: u64, creator: Address, new_metadata: S
 
 ## Contributions & Funds
 
+### Configuration-path authorization (issue #913)
+
+Every configuration entry point is guarded by `require_admin`, which requires
+the caller to sign **and** checks that the caller is the address stored by
+`initialize`. Keeping the check in one helper means a setter cannot ship with
+only one half of the check. Covered by `src/test_admin_auth.rs`.
+
+| Entry point | Required signer | Extra check |
+|---|---|---|
+| `initialize` | the `admin` argument | contract not already initialized |
+| `set_paused` | stored `admin` | contract must be initialized |
+| `set_fee` | stored `admin` | contract must be initialized |
+| `set_fee_recipient` | stored `admin` | contract must be initialized |
+| `migrate` | stored `admin` | contract must be initialized |
+
 ### Pledge-path authorization (issue #898)
 
 Every state transition on the pledge path requires exactly one signer, and
@@ -398,8 +413,8 @@ fn migrate(
 
 | Error Condition | Panic Message | Severity | Recovery Action |
 |----------------|---------------|----------|-----------------|
-| Not initialized | `"not initialized"` (assert) | High | Call `initialize()` first |
-| Caller not admin | `"only admin can call migrate"` (assert) | Critical | Only the stored admin can migrate |
+| Not initialized | `"not initialized"` | High | Call `initialize()` first |
+| Caller not admin | `"caller is not admin"` | Critical | Only the stored admin can migrate |
 | Length mismatch | `"source_ids and campaigns must have the same length"` (assert) | High | Ensure both vectors have equal length |
 | Caller not authorized | Soroban auth failure | High | Ensure `admin` signs the transaction |
 
@@ -858,9 +873,8 @@ All events use the topic prefix `(symbol_short!("Goal"), ...)`.
 |---------------|-----------|----------|----------|
 | `"already initialized"` | `initialize` | High | Do not call `initialize()` again |
 | `"min_contribution must be positive"` | `initialize` | High | Pass `min_contribution > 0` |
-| `"not initialized"` | `set_paused`, `get_admin`, `migrate` | High | Call `initialize()` with admin address |
-| `"caller is not admin"` | `set_paused` | Critical | Only the stored admin address can pause |
-| `"only admin can call migrate"` | `migrate` | Critical | Only the stored admin address can migrate |
+| `"not initialized"` | `set_paused`, `set_fee`, `set_fee_recipient`, `get_admin`, `migrate` | High | Call `initialize()` with admin address |
+| `"caller is not admin"` | `set_paused`, `set_fee`, `set_fee_recipient`, `migrate` | Critical | Only the admin address stored during `initialize()` may call configuration setters |
 | `"contract is paused"` | all state-mutating functions | Medium | Wait for admin to unpause |
 | `"campaign not found"` | all campaign-specific functions | High | Verify `campaign_id` via `get_campaign()` |
 | `"target amount must be positive"` | `create_campaign` | High | Set `target_amount > 0` |
