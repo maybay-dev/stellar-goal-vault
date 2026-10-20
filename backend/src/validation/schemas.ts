@@ -643,6 +643,33 @@ export function parseTimelineQuery(query: {
   };
 }
 
+/**
+ * Parses the query string of `GET /api/campaigns/:id/analytics`.
+ *
+ * The analytics endpoint is a pure read over one campaign and takes no
+ * query parameters. Accepting arbitrary keys would let callers silently
+ * request behaviour that does not exist (for example `?page=2`, which would
+ * look like pagination but be ignored), so any supplied key is rejected at
+ * the API boundary with a deterministic 400 instead of being dropped.
+ */
+export function parseCampaignAnalyticsQuery(
+  query: Record<string, unknown>,
+): { ok: true } | { ok: false; issues: z.core.$ZodIssue[] } {
+  const unsupportedKeys = Object.keys(query).sort();
+  if (unsupportedKeys.length === 0) {
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    issues: unsupportedKeys.map((key) => ({
+      code: 'custom' as const,
+      message: `Unsupported query parameter: ${key}. This endpoint accepts no query parameters.`,
+      path: ['query'],
+    })),
+  };
+}
+
 export type ValidationIssue = {
   field: string;
   message: string;

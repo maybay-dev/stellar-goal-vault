@@ -62,9 +62,6 @@ const paginationSchema = z.object({
   page: z.number().int().openapi({ description: 'Current page (1-based).', example: 1 }),
   limit: z.number().int().openapi({ description: 'Number of items per page.', example: 10 }),
   totalPages: z.number().int().openapi({ description: 'Total number of pages.', example: 5 }),
-});
-
-const campaignListPaginationSchema = paginationSchema.extend({
   hasPreviousPage: z.boolean().openapi({
     description: 'Whether a previous page exists for this paginated request.',
     example: false,
@@ -260,7 +257,7 @@ const contributorAddressParamSchema = stellarAddressSchema.openapi({
 const campaignListResponseSchema = z
   .object({
     data: z.array(campaignSchema),
-    pagination: campaignListPaginationSchema,
+    pagination: paginationSchema,
     requestId: z.string().openapi({
       description: 'Correlation ID also returned in the X-Request-Id response header.',
       example: 'req-123',
@@ -287,6 +284,32 @@ const campaignDetailResponseSchema = z
     data: campaignSchema,
   })
   .openapi('CampaignDetailResponse');
+
+const campaignAnalyticsSchema = z
+  .object({
+    campaignId: z.string().openapi({ description: 'Campaign ID.', example: '1' }),
+    fundingGap: z.number().openapi({
+      description: 'Amount still needed to reach the target (never negative).',
+      example: 750,
+    }),
+    status: z.enum(['open', 'funded', 'claimed', 'failed']).openapi({ example: 'open' }),
+    percentFunded: z
+      .number()
+      .openapi({ description: 'Pledged amount as a % of target.', example: 25 }),
+    pledgeCount: z
+      .number()
+      .int()
+      .openapi({ description: 'Active (non-refunded) pledge count.', example: 3 }),
+    contributorCount: z.number().int().openapi({
+      description: 'Distinct contributors who still have funds in the campaign.',
+      example: 2,
+    }),
+  })
+  .openapi('CampaignAnalytics');
+
+const campaignAnalyticsResponseSchema = z
+  .object({ data: campaignAnalyticsSchema })
+  .openapi('CampaignAnalyticsResponse');
 
 const campaignHistoryResponseSchema = z
   .object({
@@ -455,6 +478,10 @@ const registeredSchemas = {
   RefundPayload: registry.register('RefundPayload', refundRequestSchema),
   CampaignListResponse: registry.register('CampaignListResponse', campaignListResponseSchema),
   CampaignDetailResponse: registry.register('CampaignDetailResponse', campaignDetailResponseSchema),
+  CampaignAnalyticsResponse: registry.register(
+    'CampaignAnalyticsResponse',
+    campaignAnalyticsResponseSchema,
+  ),
   PledgeListResponse: registry.register('PledgeListResponse', pledgeListResponseSchema),
   ContributorPledgeListResponse: registry.register(
     'ContributorPledgeListResponse',
@@ -544,23 +571,13 @@ registry.registerPath({
     'List campaigns with optional filtering, sorting, and pagination. Omit both page and limit to return the full filtered set; when paginating, provide both and use a limit from 1 to 100.',
   request: {
     query: z.object({
-      page: z.coerce
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .openapi({
-          description: '1-based page number. Requires limit; omit page and limit for all results.',
-        }),
-      limit: z.coerce
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .optional()
-        .openapi({
-          description: 'Items per page, from 1 to 100. Requires page; omit page and limit for all results.',
-        }),
+      page: z.coerce.number().int().min(1).optional().openapi({
+        description: '1-based page number. Requires limit; omit page and limit for all results.',
+      }),
+      limit: z.coerce.number().int().min(1).max(100).optional().openapi({
+        description:
+          'Items per page, from 1 to 100. Requires page; omit page and limit for all results.',
+      }),
       q: z.string().optional().openapi({ description: 'Search query (title, creator, or id).' }),
       search: z.string().optional().openapi({ description: 'Alias for q.' }),
       asset: z.string().optional().openapi({ description: 'Comma-separated list of asset codes.' }),
@@ -678,11 +695,21 @@ registry.registerPath({
   path: '/api/campaigns/{id}/pledges',
   tags: ['Pledges'],
   summary: 'List campaign pledges',
+  description:
+    'Returns pledges newest-first. Pagination is deterministic: page defaults to 1 and limit ' +
+    'defaults to 10 when omitted, both must be integers, and limit is capped at 100. ' +
+    'Out-of-range values are rejected with 400 rather than clamped. The response includes ' +
+    'total, totalPages, hasPreviousPage, and hasNextPage so callers can navigate without ' +
+    'guessing where the collection ends.',
   request: {
     params: z.object({ id: campaignIdParamSchema }),
     query: z.object({
-      page: z.coerce.number().int().min(1).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional(),
+      page: z.coerce.number().int().min(1).optional().openapi({
+        description: '1-based page number (default 1).',
+      }),
+      limit: z.coerce.number().int().min(1).max(100).optional().openapi({
+        description: 'Items per page, 1 to 100 (default 10).',
+      }),
     }),
   },
   responses: {
@@ -799,6 +826,27 @@ registry.registerPath({
 
 registry.registerPath({
   method: 'get',
+  path: '/api/campaigns/{id}/analytics',
+  tags: ['Campaigns'],
+  summary: 'Get campaign analytics',
+  description:
+    'Read-only analytics for one campaign. The path id must be a canonical positive integer ' +
+    '(no leading zeros, signs, or decimals) and the endpoint accepts no query parameters: ' +
+    'unknown or malformed input is rejected with 400 instead of being ignored. Missing ' +
+    'campaigns return 404.',
+  request: { params: z.object({ id: campaignIdParamSchema }) },
+  responses: {
+    200: {
+      description: 'Campaign analytics',
+      content: { 'application/json': { schema: registeredSchemas.CampaignAnalyticsResponse } },
+    },
+    400: validationErrorResponse,
+    404: notFoundResponse,
+  },
+});
+
+registry.registerPath({
+  method: 'get',
   path: '/api/campaigns/{id}/contributors',
   tags: ['Campaigns'],
   summary: 'Get campaign contributor summary',
@@ -842,12 +890,18 @@ registry.registerPath({
   summary: 'List pledges by contributor',
   description:
     'Returns all pledges made by a contributor address across all campaigns. ' +
-    'Unknown addresses return an empty array. Refunded pledges include the refundedAt timestamp.',
+    'Unknown addresses return an empty array. Refunded pledges include the refundedAt timestamp. ' +
+    'Pagination uses the same defaults and bounds as the campaign pledge list: page defaults to ' +
+    '1, limit defaults to 10 and is capped at 100, and out-of-range values are rejected with 400.',
   request: {
     params: z.object({ address: contributorAddressParamSchema }),
     query: z.object({
-      page: z.coerce.number().int().min(1).optional(),
-      limit: z.coerce.number().int().min(1).max(100).optional(),
+      page: z.coerce.number().int().min(1).optional().openapi({
+        description: '1-based page number (default 1).',
+      }),
+      limit: z.coerce.number().int().min(1).max(100).optional().openapi({
+        description: 'Items per page, 1 to 100 (default 10).',
+      }),
     }),
   },
   responses: {

@@ -32,6 +32,7 @@ import {
   claimCampaign,
   createCampaign,
   getCampaign,
+  getCampaignAnalytics,
   getCampaignWithProgress,
   getContributorSummary,
   getGlobalStats,
@@ -65,6 +66,7 @@ import {
   claimCampaignPayloadSchema,
   createCampaignPayloadSchema,
   createPledgePayloadSchema,
+  parseCampaignAnalyticsQuery,
   parseHistoryPaginationQuery,
   parsePledgeListPaginationQuery,
   parseTimelineQuery,
@@ -265,7 +267,15 @@ function parseCampaignId(
 
   const parsed = campaignIdSchema.safeParse(campaignIdRaw);
   if (!parsed.success) {
-    return { ok: false, issues: parsed.error.issues };
+    // Path parameters have no Zod path of their own, so a schema-level
+    // refinement would surface as `field: "body"` in the error envelope.
+    // Label the failure with the actual parameter name instead.
+    return {
+      ok: false,
+      issues: parsed.error.issues.map((issue) =>
+        issue.path.length > 0 ? issue : { ...issue, path: ['id'] },
+      ),
+    };
   }
 
   return { ok: true, value: parsed.data };
@@ -649,6 +659,35 @@ app.get('/api/campaigns/:id', async (req: Request, res: Response, next: express.
   }
 });
 
+app.get('/api/campaigns/:id/analytics', (req: Request, res: Response) => {
+  // Validate the whole boundary before touching storage: the path id must be a
+  // canonical positive integer, and this read model takes no query parameters.
+  // Rejecting unknown keys (instead of ignoring them) keeps `?page=2`-style
+  // requests from looking like they did something when they did not.
+  const parsedId = parseCampaignId(req.params.id);
+  if (!parsedId.ok) {
+    sendValidationError(parsedId.issues);
+  }
+
+  const parsedQuery = parseCampaignAnalyticsQuery(req.query as Record<string, unknown>);
+  if (!parsedQuery.ok) {
+    sendValidationError(parsedQuery.issues);
+  }
+
+  const analytics = getCampaignAnalytics(parsedId.value);
+  if (!analytics) {
+    throw new AppError('Campaign not found.', 404, 'NOT_FOUND');
+  }
+
+  res.setHeader('Cache-Control', 'max-age=30');
+  res.json({
+    data: {
+      campaignId: parsedId.value,
+      ...analytics,
+    },
+  });
+});
+
 app.delete(
   '/api/campaigns/:id',
   applyRateLimit(WRITE_RATE_LIMIT_MAX_REQUESTS),
@@ -712,6 +751,12 @@ app.get('/api/campaigns/:id/pledges', (req: Request, res: Response) => {
       page: paginationResult.page,
       limit: paginationResult.limit,
       totalPages,
+      // Same navigation semantics as GET /api/campaigns: a page is only a
+      // "previous" page if there is something before it, and `hasNextPage`
+      // is derived from the bounded total, so clients never need a second
+      // request to discover the end of the collection.
+      hasPreviousPage: paginationResult.page > 1 && totalCount > 0,
+      hasNextPage: paginationResult.page < totalPages,
     },
   });
 });
@@ -882,6 +927,7 @@ app.get('/api/contributors/:address/pledges', (req: Request, res: Response) => {
     page: query.page,
     limit: query.limit,
   });
+  const totalPages = Math.max(1, Math.ceil(totalCount / query.limit));
 
   res.setHeader('X-Total-Count', String(totalCount));
   res.json({
@@ -890,7 +936,9 @@ app.get('/api/contributors/:address/pledges', (req: Request, res: Response) => {
       total: totalCount,
       page: query.page,
       limit: query.limit,
-      totalPages: Math.max(1, Math.ceil(totalCount / query.limit)),
+      totalPages,
+      hasPreviousPage: query.page > 1 && totalCount > 0,
+      hasNextPage: query.page < totalPages,
     },
   });
 });
