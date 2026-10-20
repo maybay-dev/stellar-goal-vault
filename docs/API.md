@@ -18,6 +18,7 @@ Full reference for the Stellar Goal Vault REST API.
   - [GET /api/campaigns](#get-apicampaigns)
   - [POST /api/campaigns](#post-apicampaigns)
   - [GET /api/campaigns/:id](#get-apicampaignsid)
+  - [GET /api/campaigns/:id/analytics](#get-apicampaignsidanalytics)
   - [GET /api/campaigns/:id/pledges](#get-apicampaignsidpledges)
   - [POST /api/campaigns/:id/pledges](#post-apicampaignsidpledges)
   - [POST /api/campaigns/:id/pledges/reconcile](#post-apicampaignsidpledgesreconcile)
@@ -212,26 +213,72 @@ Creates a new campaign.
 
 ### `GET /api/campaigns/:id`
 
-Returns a single campaign with pledges and event history.
+Returns a single campaign with computed `progress` and a bounded preview of its five newest
+pledges. Full pledge history and pagination live on the dedicated collection endpoints below.
 
-**Path parameters:** `id` — numeric campaign ID.
+**Path parameters:** `id` — canonical positive integer campaign ID. Values such as `0`,
+`-1`, `1.5`, `01`, or non-numeric strings are rejected with `400` and a `details` entry for
+the `id` field rather than being coerced.
 
-**Response `200 OK`:** Campaign object with embedded `pledges` array, wrapped in `{ "data": { ... } }`.
+**Response `200 OK`:** Campaign object with `progress` and a `pledges` preview, wrapped in
+`{ "data": { ... } }`. Responses are cached per campaign for 30 seconds (`X-Cache` reports
+`MISS` for a fresh read and `HIT` for a cached one).
 
-**Response `404 Not Found`** when the campaign does not exist.
+**Response `400 Bad Request`** for a malformed ID, **`404 Not Found`** when the campaign does
+not exist, and **`500`** with a generic error body (no storage or stack details) when the
+underlying read fails.
+
+---
+
+### `GET /api/campaigns/:id/analytics`
+
+Read-only analytics for one campaign.
+
+**Path parameters:** `id` — canonical positive integer campaign ID (validated the same way as
+the detail endpoint).
+
+**Query parameters:** none. Unknown parameters such as `?page=2` are rejected with `400`
+(`details[].field = "query"`) instead of being silently ignored.
+
+**Response `200 OK`:**
+
+```json
+{
+  "data": {
+    "campaignId": "1",
+    "fundingGap": 775,
+    "status": "open",
+    "percentFunded": 22.5,
+    "pledgeCount": 3,
+    "contributorCount": 2
+  }
+}
+```
+
+`fundingGap` is clamped at zero for over-funded campaigns, `pledgeCount` counts active
+(non-refunded) pledges, and `contributorCount` counts distinct contributors who still have
+funds in the campaign (fully refunded contributors are excluded).
+
+**Response `400 Bad Request`** for a malformed ID or unsupported query parameter, and
+**`404 Not Found`** when the campaign does not exist.
 
 ---
 
 ### `GET /api/campaigns/:id/pledges`
 
-Returns paginated pledges for a campaign.
+Returns paginated pledges for a campaign, newest first.
 
 **Query parameters:**
 
-| Parameter | Type    | Description              |
-|-----------|---------|--------------------------|
-| `page`    | integer | Page number (default 1). |
-| `limit`   | integer | Results per page 1–100.  |
+| Parameter | Type    | Description                                              |
+|-----------|---------|----------------------------------------------------------|
+| `page`    | integer | Page number, 1-based (default 1).                        |
+| `limit`   | integer | Results per page, 1–100 (default 10).                    |
+
+Pagination is deterministic (`created_at DESC, id DESC`). Out-of-range values — `page=0`,
+`page=abc`, `limit=101`, `limit=1.5` — return `400` with a `VALIDATION_ERROR` envelope rather
+than being clamped, and a page past the end returns an empty `data` array with the real
+`total`/`totalPages`.
 
 **Response `200 OK`:**
 
@@ -249,13 +296,18 @@ Returns paginated pledges for a campaign.
     }
   ],
   "pagination": {
-    "total": 1,
+    "total": 3,
     "page": 1,
-    "limit": 20,
-    "totalPages": 1
+    "limit": 2,
+    "totalPages": 2,
+    "hasPreviousPage": false,
+    "hasNextPage": true
   }
 }
 ```
+
+The same `pagination` shape (including `hasPreviousPage`/`hasNextPage`) is returned by
+`GET /api/contributors/:address/pledges`.
 
 ---
 
